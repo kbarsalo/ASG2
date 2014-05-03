@@ -33,7 +33,7 @@ FORWARD _PROTOTYPE( void balance_queues, (struct timer *tp)		);
 PUBLIC int do_noquantum(message *m_ptr)
 {
 	register struct schedproc *rmp;
-	register struct schedproc *rmp_temp;
+	register struct schedproc *temp;
 	int rv, proc_nr_n;
 
 	if (sched_isokendpt(m_ptr->m_source, &proc_nr_n) != OK) {
@@ -44,23 +44,31 @@ PUBLIC int do_noquantum(message *m_ptr)
 
 	rmp = &schedproc[proc_nr_n];
 
-     /* New Code */
-    if (!(rmp->flags & USER_PROCESS) && rmp->priority < MIN_USER_Q) /* system process */ {
-        rmp->priority++;
-        printf("system process ran out of quantum\n");
+
+    /*Says if the scheduling process is not active and the process priority
+     is less than the minimum priority of the user process than the current
+     process' priority scheduling is decreased*/
+    if (!(rmp->flags & USER_PROCESS) && rmp->priority < MIN_USER_Q){
+        rmp->priority++; /*decrease priority */
+        printf("Process ran out of time\n");
     }
-    else if ((rmp->flags & USER_PROCESS) && rmp->priority == (MIN_USER_Q - 1)) /* winner ran out of quantum */ {
-        rmp->priority = MIN_USER_Q;
-        change_tickets(rmp_temp, -1);
-        printf("winning process ran out of quantum\n");
+    /* Says if the scheduling process is active and the current process
+    priority is equal to the highest priority queue then the priority is set
+    to the least important priority queue and adjusts the tickets held
+    accordingly  */
+    else if ((rmp->flags & USER_PROCESS) && rmp->priority == (MIN_USER_Q - 1)) {
+        rmp->priority = MIN_USER_Q; /* set to lowest priority */
+        swap_tickets(temp, -1);
+        printf("Winning process ran out of time\n");
     }
-    else /* a process other than a winning process ran out of quantum. this means that
-              the winning processe(s) are IO bound, so increase their tickets */
+    /* else the user's process are not from the CPU and the tickets are adjusted
+     accordingly */
+    else
         if (rmp->flags & USER_PROCESS) {
-            for (proc_nr_n = 0, rmp_temp = schedproc; proc_nr_n < NR_PROCS; ++proc_nr_n, ++rmp_temp)
-                if (rmp_temp->priority == (MIN_USER_Q - 1) && rmp_temp->flags == (IN_USE | USER_PROCESS))
-                    change_tickets(rmp_temp, 1);
-            printf("IO bound process detected, Adding tickets to WINNING process\n");
+            for (proc_nr_n = 0, temp = schedproc; proc_nr_n < NR_PROCS; proc_nr_n++, temp++)
+                if (temp->priority == (MIN_USER_Q - 1) && temp->flags == (IN_USE | USER_PROCESS))
+                    swap_tickets(temp, 1);
+            printf("IO bound interrupt. Adding tickets to highest priority process\n");
         }
 
     /* Run process */
@@ -161,7 +169,7 @@ PUBLIC int do_start_scheduling(message *m_ptr)
 
 		/* NEW CODE */
 		rmp->priority = MIN_USER_Q;
-		rmp->flags |= USER_PROCESS; /* CHANGE LATER */
+		rmp->flags = USER_PROCESS;
 
 		rmp->time_slice = schedproc[parent_nr_n].time_slice;
 		break;
@@ -179,7 +187,7 @@ PUBLIC int do_start_scheduling(message *m_ptr)
 		return rv;
 	}
 	/* NEW CODE */
-	rmp->flags |= IN_USE; /* CHANGE LATER */
+	rmp->flags = IN_USE;
 
 	/* Schedule the process, giving it some quantum */
 	if ((rv = schedule_process(rmp)) != OK) {
@@ -226,6 +234,9 @@ PUBLIC int do_nice(message *m_ptr)
 		return EINVAL;
 	}
 
+	/* Adjusts the tickets accordingly. */
+	swap_tickets(rmp, new_q);
+
 	/* Store old values, in case we need to roll back the changes */
 	old_q     = rmp->priority;
 	old_max_q = rmp->max_priority;
@@ -266,23 +277,11 @@ PRIVATE int schedule_process(struct schedproc * rmp)
 
 PUBLIC void init_scheduling(void)
 {
-    /*The <minix/u64.h> include file
-     defines  a  64 bit data type, u64_t, and a number of functions to operate
-     on them.  Note that these functions are geared towards common disk offset
-     and  block  computations,  and  do  not  provide  a  full  set  of 64 bit
-     operations.*/
-
-    u64_t disk; /* New Code */
 
 	balance_timeout = BALANCE_TIMEOUT * sys_hz();
 	init_timer(&sched_timer);
 	set_timer(&sched_timer, balance_timeout, balance_queues, 0);
 
-	/* Use the free running clock as TSC */
-	read_tsc_64(&disk); /* New Code */
-
-	/*Random # generator */
-	srand((unsigned)disk.lo); /* New Code */
 }
 
 /*===========================================================================*
@@ -303,12 +302,21 @@ PRIVATE void balance_queues(struct timer *tp)
 	/* NEW CODE */
     for (proc_nr = 0, rmp = schedproc; proc_nr < NR_PROCS; proc_nr++, rmp++)
         if (rmp->priority > rmp->max_priority && rmp->flags & IN_USE) {
-            rmp->priority--;
+            rmp->priority--; /*Raises the priority*/
             schedule_process(rmp);
         }
 
 	set_timer(&sched_timer, balance_timeout, balance_queues, 0);
 }
+
+/*===========================================================================*
+ *				run_lottery			     *
+ *===========================================================================*/
+ /* This function makes up the bulk of the lottery scheduling process. Inside
+    the function, the typical variables include the scheduling process, the test
+    random variable, the numbered process, the winning or lucky ticket, and the
+    total number of tickets used to calculate the lucky ticket number.
+ */
 
 PRIVATE int run_lottery()
 {
@@ -359,7 +367,16 @@ PRIVATE int run_lottery()
 
 }
 
-PRIVATE void change_tickets(struct schedproc *rmp, int qty) {
+
+/*===========================================================================*
+ *				swap_tickets                                     		     *
+ *===========================================================================*/
+ /*Implemented a scheme to dynamically add and take away tickets from 
+processes. If a process uses up its quantum, take away a ticket. If not, give it a ticket. Cap 
+tickets from 1 to N, where N was the requested number of tickets. Takes in the current process
+and either a 1 or -1 which affects if the minimum or maximum number of tickets.*/
+
+PRIVATE void swap_tickets(struct schedproc *rmp, int qty) {
     rmp->nTickets += qty;
     if (rmp->nTickets > 100)
         rmp->nTickets = 100;
